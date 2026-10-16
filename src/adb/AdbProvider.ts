@@ -170,7 +170,7 @@ const hashAdbFile = async (
     return await hashStableFile(path, {
       ...(signal === undefined ? {} : { signal }),
       retainFailedClose: (handle) => {
-        closeLease = new AnalysisCleanupLease(() => handle.close());
+        closeLease = new AnalysisCleanupLease(() => handle.close(), [path]);
         resources.retain({
           kind: "lease",
           resource: `${path} (ADB digest handle)`,
@@ -326,7 +326,10 @@ const syncStagedAdbFile = async (
   }
   const resource = `${path} (ADB staged-output handle)`;
   const stagedOwner = owner;
-  const closeLease = new AnalysisCleanupLease(() => stagedOwner.close());
+  const closeLease = new AnalysisCleanupLease(
+    () => stagedOwner.close(),
+    [resource],
+  );
   const released = await resources.release({
     kind: "lease",
     resource,
@@ -584,22 +587,6 @@ const hardLinksUnsupported = (cause: unknown): boolean =>
 const describeAdbFailure = (cause: unknown): string =>
   cause instanceof Error ? cause.message : String(cause);
 
-const cleanupLeasesForRetryFailure = (
-  cause: unknown,
-): readonly AnalysisCleanupLease[] | undefined => {
-  if (!(cause instanceof ArtifactResourceRetryFailure)) return undefined;
-  const leases = new Set<AnalysisCleanupLease>();
-  for (const owner of cause.failedOwners) {
-    if (
-      owner.kind !== "lease" ||
-      !(owner.lease instanceof AnalysisCleanupLease)
-    )
-      return undefined;
-    leases.add(owner.lease);
-  }
-  return leases.size > 0 ? [...leases] : undefined;
-};
-
 interface ScreenPublicationCloseFailure {
   readonly cause: unknown;
   readonly resource: string;
@@ -621,7 +608,10 @@ const publishScreenExclusively = async (
   // the visible file despite later cancellation so its receipt remains known.
   const ownedOutput = new OwnedFileHandle(output);
   const handleResource = `${outputPath} (ADB publication handle)`;
-  const closeOnly = new AnalysisCleanupLease(() => ownedOutput.close());
+  const closeOnly = new AnalysisCleanupLease(
+    () => ownedOutput.close(),
+    [handleResource],
+  );
   const removeOutput = async (
     expected: Awaited<ReturnType<typeof output.stat>>,
   ): Promise<void> => {
@@ -1046,7 +1036,10 @@ export class AdbProvider {
           const leases =
             (cause instanceof AnalysisError
               ? this.#outputDirectoryRetryLeases.get(cause)
-              : undefined) ?? cleanupLeasesForRetryFailure(cause);
+              : undefined) ??
+            (cause instanceof ArtifactResourceRetryFailure
+              ? cause.cleanupLeases
+              : undefined);
           if (leases === undefined) allFailuresHaveExactLeaseOwners = false;
           for (const lease of leases ?? []) failedLeases.add(lease);
         }
@@ -1390,7 +1383,10 @@ export class AdbProvider {
           [cause],
           this.#cleanupResources(cause, "ADB provider-owned resource"),
         );
-        const leases = cleanupLeasesForRetryFailure(cause);
+        const leases =
+          cause instanceof ArtifactResourceRetryFailure
+            ? cause.cleanupLeases
+            : undefined;
         if (leases !== undefined) new AnalysisCleanupLeaseGroup(error, leases);
         return err(error);
       }
